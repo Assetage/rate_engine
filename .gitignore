@@ -1,0 +1,8 @@
+.idea
+__pycache__
+
+test_full.csv
+catboost_info
+old
+notebooks
+cb_model
