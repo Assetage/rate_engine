@@ -66,8 +66,8 @@ def create_lag_features(df, target_col, group_cols):
     # Function to create lag features for a given group
     def create_lags(group):
         result = group.copy()
-        result['latest_rate'] = group[target_col].shift(1)
-        result['latest_rate_2nd'] = group[target_col].shift(2)
+        result['latest_rate'] = group[target_col].shift(1).ffill()
+        result['latest_rate_2nd'] = group[target_col].shift(1).ffill().shift(1).ffill()
         result['mean_rate_30d'] = group[target_col].shift(1).rolling(window=30, min_periods=1).mean()
         result['mean_rate_45d'] = group[target_col].shift(1).rolling(window=45, min_periods=1).mean()
         result['mean_rate_90d'] = group[target_col].shift(1).rolling(window=90, min_periods=1).mean()

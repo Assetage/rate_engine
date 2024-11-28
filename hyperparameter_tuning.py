@@ -42,10 +42,9 @@ def random_search_tuning(df_train, train_target, df_eval, eval_target, cat_featu
         'l2_leaf_reg': np.linspace(1, 15.0, num=10),  # Increased lower bound
         'iterations': [5000],
         'min_data_in_leaf': [1, 5, 8, 10,12, 20],
-        'subsample': np.linspace(0.3, 0.9, num=6),
-        'boosting_type': ['Plain', 'Ordered'],
+        'rsm': np.linspace(0.3, 0.9, num=6),
         'grow_policy': ['SymmetricTree', 'Depthwise', 'Lossguide'],
-        'bootstrap_type': ['Bayesian', 'Bernoulli', 'MVS'],
+        'bootstrap_type': ['Bayesian','Bernoulli', 'MVS'],
         'early_stopping_rounds': [500]
     }
 

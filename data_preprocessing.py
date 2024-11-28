@@ -25,13 +25,17 @@ def create_features(df, cat_features):
     df = create_lag_features(df, 'rate', cat_features)
     return df
 
-def split_data(df):
+def split_data(df, enable_test=False):
     df_train = df[df["source"]=="train"].drop("source", axis=1)
     df_eval = df[df["source"]=="eval"].drop("source", axis=1)
+    if enable_test==True:
+        df_test = df[df["source"]=="test"].drop("source", axis=1)
+        df_test = df_test.set_index('temp_original_index')
+        return pd.concat([df_train,df_test], axis=0, ignore_index=True), df_test
     return df_train, df_eval
 
 
-def preprocess_data(df):
+def preprocess_data(df, enable_test=False):
     cat_features = ["transport_type", "origin_kma", "destination_kma"]
     df["pickup_date"] = pd.to_datetime(df["pickup_date"], format='%Y-%m-%d %H:%M:%S').astype('datetime64[ns]')
     df = df.sort_values(by=["pickup_date", "transport_type", "origin_kma", "destination_kma"])
@@ -45,8 +49,10 @@ def preprocess_data(df):
     # df = create_distance_features(df)
     
     drop_features = ["rate"]
-    target = df.rate
-    df = df.drop(columns=drop_features)
+    target=None
+    if enable_test==False:
+        target = df.rate
+        df = df.drop(columns=drop_features)
     
     cat_features = cat_features#+["route_frequency_bin"]#+["distance_category"] + time_cat_features #
     return df, target, cat_features

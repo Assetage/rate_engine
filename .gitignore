@@ -6,3 +6,4 @@ catboost_info
 old
 notebooks
 cb_model
+dataset/eval_results.csv
