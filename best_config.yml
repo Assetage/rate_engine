@@ -1,27 +1,24 @@
 best_params:
-  boosting_type: Plain
+  eval_metric: "MAPE"
   bootstrap_type: MVS
-  depth: '8'
-  iterations: '10000'
-  early_stopping_rounds: '1000'
-  l2_leaf_reg: '3.8'
-  learning_rate: '0.05'
-  min_data_in_leaf: '20'
-  rsm: '1.0'
+  iterations: '200000'
+  learning_rate: '0.01'
+  early_stopping_rounds: '10000'
+  depth: '10'
 cat_features:
-- transport_type
 - origin_kma
 - destination_kma
+- transport_type
 selected_features:
-- transport_type
-- latest_rate_2nd
-- ewma_120d
 - valid_miles
-- mean_rate_120d
-- latest_rate
+- transport_type
 - origin_kma
-- mean_rate_30d
-- ewma_30d
 - destination_kma
-- mean_rate_90d
-- ewma_90d
+- rate_similar_1
+- rate_similar_2
+- rate_similar_3
+- rate_similar_8
+- rate_similar_9
+- rate_similar_10
+- order_index
+- pickup_date_unix_ratio

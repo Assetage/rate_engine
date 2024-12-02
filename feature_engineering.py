@@ -1,217 +1,147 @@
-import pandas as pd
 import numpy as np
-from scipy import stats
+import pandas as pd
 import shap
-
 from sklearn.inspection import permutation_importance
-from pandas.tseries.holiday import USFederalHolidayCalendar
+from sklearn.model_selection import TimeSeriesSplit
 
-
-def generate_time_features(df, timestamp_col):
-    # Ensure the timestamp column is in datetime format
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    
-    # Extract basic time components
-    df['year'] = df[timestamp_col].dt.year
-    df['month'] = df[timestamp_col].dt.month
-    df['day'] = df[timestamp_col].dt.day
-    df['hour'] = df[timestamp_col].dt.hour
-    df['minute'] = df[timestamp_col].dt.minute
-    df['day_of_week'] = df[timestamp_col].dt.dayofweek
-    
-    # Weekday/Weekend
+def generate_time_features(df):
+    # Time-based features
+    df['pickup_date'] = pd.to_datetime(df['pickup_date'])
+    df['year'] = df['pickup_date'].dt.year
+    df['quarter'] = df['pickup_date'].dt.quarter
+    df['month'] = df['pickup_date'].dt.month
+    df['day_of_week'] = df['pickup_date'].dt.dayofweek
     df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-    
-    # Part of the day
-    df['part_of_day'] = pd.cut(df['hour'], 
-                               bins=[-1, 6, 12, 18, 24], 
-                               labels=['Night', 'Morning', 'Afternoon', 'Evening'])
-    
-    def get_season(month):
-        if month in [12, 1, 2]:
-            return 'Winter'
-        elif month in [3, 4, 5]:
-            return 'Spring'
-        elif month in [6, 7, 8]:
-            return 'Summer'
-        else:  # 9, 10, 11
-            return 'Fall'
-    
-    df['season'] = df['month'].apply(get_season)
-    
-    # US Federal Holidays
-    cal = USFederalHolidayCalendar()
-    holidays = cal.holidays(start=df[timestamp_col].min(), end=df[timestamp_col].max())
-    df['is_holiday'] = df[timestamp_col].dt.date.astype('datetime64[ns]').isin(holidays).astype(int)
-    
-    # Is it rush hour? (You can adjust the hours as needed)
-    df['is_rush_hour'] = ((df['hour'] >= 7) & (df['hour'] <= 9) | 
-                          (df['hour'] >= 16) & (df['hour'] <= 18)).astype(int)
-    
-    # Cyclical encoding for hour, day of week, and month
-    df['hour_sin'] = np.sin(df['hour'] * (2 * np.pi / 24))
-    df['hour_cos'] = np.cos(df['hour'] * (2 * np.pi / 24))
+    df['day_of_year'] = df['pickup_date'].dt.dayofyear
     df['day_of_week_sin'] = np.sin(df['day_of_week'] * (2 * np.pi / 7))
     df['day_of_week_cos'] = np.cos(df['day_of_week'] * (2 * np.pi / 7))
     df['month_sin'] = np.sin((df['month'] - 1) * (2 * np.pi / 12))
     df['month_cos'] = np.cos((df['month'] - 1) * (2 * np.pi / 12))
-    
-    df = df.drop(columns=["year","month","day","hour","minute","day_of_week"])
-    cat_features = ["is_weekend","part_of_day","season","is_holiday","is_rush_hour"]
-    return df, cat_features
-
-def create_lag_features(df, target_col, group_cols):
-    df = df.sort_values('pickup_date')
-    
-    # Function to create lag features for a given group
-    def create_lags(group):
-        result = group.copy()
-        result['latest_rate'] = group[target_col].shift(1).ffill()
-        result['latest_rate_2nd'] = group[target_col].shift(1).ffill().shift(1).ffill()
-        result['mean_rate_30d'] = group[target_col].shift(1).rolling(window=30, min_periods=1).mean()
-        result['mean_rate_45d'] = group[target_col].shift(1).rolling(window=45, min_periods=1).mean()
-        result['mean_rate_90d'] = group[target_col].shift(1).rolling(window=90, min_periods=1).mean()
-        result['mean_rate_120d'] = group[target_col].shift(1).rolling(window=120, min_periods=1).mean()
-        
-        # Exponentially weighted moving averages (EWMA)
-        result['ewma_30d'] = group[target_col].shift(1).ewm(span=30, min_periods=1).mean()
-        result['ewma_45d'] = group[target_col].shift(1).ewm(span=45, min_periods=1).mean()
-        result['ewma_90d'] = group[target_col].shift(1).ewm(span=90, min_periods=1).mean()
-        result['ewma_120d'] = group[target_col].shift(1).ewm(span=120, min_periods=1).mean()
-        
-        # Rate of change features
-        result['rate_change_30d'] = (group[target_col].shift(1) - group[target_col].shift(30)) / group[target_col].shift(30)
-        result['rate_change_45d'] = (group[target_col].shift(1) - group[target_col].shift(45)) / group[target_col].shift(45)
-        result['rate_change_90d'] = (group[target_col].shift(1) - group[target_col].shift(90)) / group[target_col].shift(90)
-        
-        return result
-    
-    df = df.groupby(group_cols, group_keys=False).apply(create_lags)
-        
-    for col in group_cols:
-        col_prefix = f"{col}_"
-        temp_df = df.groupby(col, group_keys=False).apply(create_lags)
-        
-        lag_columns = ['latest_rate', 'latest_rate_2nd', 'mean_rate_30d','mean_rate_45d', 'mean_rate_90d', 'mean_rate_120d',
-                       'ewma_30d', 'ewma_45d','ewma_90d', 'ewma_120d', 
-                       'rate_change_30d', 'rate_change_45d','rate_change_90d']
-        
-        for lag_col in lag_columns:
-            df[f'{col_prefix}{lag_col}'] = temp_df[lag_col]
+    df['date'] = df['pickup_date'].dt.date
     return df
 
-def create_route_features(df):
-    # Create a unique identifier for each route, regardless of direction
-    df['route_id'] = df.apply(lambda row: '_'.join(sorted([row['origin_kma'], row['destination_kma']])), axis=1)
+def calculate_category_boundaries(series, num_categories=5):
+    """
+    Calculate category boundaries based on quantiles of the input series.
     
-    # Calculate route statistics
-    route_stats = df.groupby('route_id').agg({
-        'valid_miles': ['mean', 'median', 'std', 'count']
-    })
-    route_stats.columns = [f'route_{c[0]}_{c[1]}' for c in route_stats.columns]
+    :param series: pandas Series to calculate boundaries for
+    :param num_categories: number of categories to create
+    :return: list of boundary values
+    """
+    quantiles = np.linspace(0, 1, num_categories + 1)
+    boundaries = series.quantile(quantiles).unique()
+    return boundaries
+
+def apply_categories(series, boundaries, feature_name):
+    """
+    Apply pre-calculated boundaries to categorize a series.
     
-    # Merge route statistics back to the main dataframe
-    df = df.merge(route_stats, left_on='route_id', right_index=True, how='left')
+    :param series: pandas Series to categorize
+    :param boundaries: list of boundary values
+    :param feature_name: name of the feature (used for category labels)
+    :return: pandas Series with categories
+    """
+    labels = [f'{feature_name}_cat_{i+1}' for i in range(len(boundaries) - 1)]
+    category_ranges = {label: f"{boundaries[i]:.2f} - {boundaries[i+1]:.2f}" 
+                       for i, label in enumerate(labels)}
+    return pd.cut(series, bins=boundaries, labels=labels, include_lowest=True)
+
+def calculate_custom_distance_boundaries(series, num_categories=5):
+    """
+    Calculate custom distance category boundaries with more granularity for shorter distances,
+    ensuring all values are covered.
     
-    # Create a route frequency feature
-    df['route_frequency'] = df['route_valid_miles_count']
+    :param series: pandas Series of distances
+    :param num_categories: Total number of categories to create
+    :return: list of boundary values
+    """
+    min_value = series.min()
+    max_value = series.max()
     
-    # Optionally, bin the route frequency
-    df['route_frequency_bin'] = pd.qcut(df['route_frequency'], q=5, labels=['Very Low', 'Low', 'Medium', 'High', 'Very High'])
+    # Calculate quantiles with more emphasis on lower values
+    quantiles = [0] + [1 / (2 ** i) for i in range(num_categories - 1, 0, -1)]
+    boundaries = series.quantile(quantiles).tolist()
     
-    # Drop the route_id column if we're not using it as a direct feature
-    df = df.drop('route_id', axis=1)
+    # Ensure the boundaries cover all values
+    boundaries[0] = min_value
+    boundaries.append(max_value)
     
+    # Remove any duplicate boundaries
+    boundaries = sorted(set(boundaries))
+    
+    return boundaries
+
+def generate_categorized_features(df, df_train):
+    distance_boundaries = calculate_category_boundaries(df_train['valid_miles'])
+    custom_distance_boundaries = calculate_custom_distance_boundaries(df_train['valid_miles'])
+    df['distance_category'] = apply_categories(df['valid_miles'], distance_boundaries, 'distance')
+    df['custom_distance_category'] = apply_categories(df['valid_miles'], custom_distance_boundaries, 'custom_distance')
     return df
 
-def create_distance_variation_features(df):
-    df['route_id'] = df.apply(lambda row: '_'.join(sorted([row['origin_kma'], row['destination_kma']])), axis=1)
-    # Calculate the standard deviation of miles for each route
-    route_mile_std = df.groupby('route_id')['valid_miles'].std().reset_index(name='route_mile_std')
-    df = df.merge(route_mile_std, on='route_id', how='left')
+def generate_droute_popularity(df, origin_col='origin_kma', destination_col='destination_kma'):
+    """
+    Create route popularity features.
     
-    # Calculate the difference between current miles and average miles for the route
-    df['mile_diff_from_avg'] = df['valid_miles'] - df['route_valid_miles_mean']
-    df = df.drop('route_id', axis=1)
+    :param df: DataFrame containing the data
+    :param origin_col: Name of the column containing the origin
+    :param destination_col: Name of the column containing the destination
+    :return: DataFrame with added route popularity features
+    """
+    df[origin_col] = df[origin_col].astype(str)
+    df[destination_col] = df[destination_col].astype(str)
+    # Create a directional route identifier
+    df['directional_route'] = df[origin_col] + '_to_' + df[destination_col]
+    
+    # Calculate raw popularity (count of rows for each route)
+    route_popularity = df['directional_route'].value_counts()
+    
+    # Calculate normalized popularity (fraction of total recordings)
+    total_records = len(df)
+    route_popularity_normalized = route_popularity / total_records
+    
+    # Add the popularity features to the dataframe
+    df['route_popularity_raw'] = df['directional_route'].map(route_popularity)
+    df['route_popularity_normalized'] = df['directional_route'].map(route_popularity_normalized)
+    df['directional_route'] = df['directional_route'].astype("category")
+    df['route_popularity_raw'] = df['route_popularity_raw'].astype("uint16")
+    df['route_popularity_normalized'] = df['route_popularity_normalized'].astype("float16")
+    df[origin_col] = df[origin_col].astype("category")
+    df[destination_col] = df[destination_col].astype("category")
     return df
 
-def create_transport_type_features(df):
-    # Group statistics for miles
-    transport_stats = df.groupby('transport_type').agg({
-        'valid_miles': ['mean', 'median', 'std']
-    })
-    transport_stats.columns = [f'transport_{c[0]}_{c[1]}' for c in transport_stats.columns]
-    df = df.merge(transport_stats, left_on='transport_type', right_index=True, how='left')
+def generate_lagged_features(df, 
+                             cat_features=["transport_type","custom_distance_category"], 
+                             date_col='date', target_col='rate_similar_1', windows=[30, 45, 90, 120]):
+    # Ensure the date column is datetime
+    df[date_col] = pd.to_datetime(df[date_col])
     
-    # Transport type popularity
-    transport_popularity = df.groupby('transport_type').size().reset_index(name='transport_popularity')
-    df = df.merge(transport_popularity, on='transport_type', how='left')
+    # Sort the dataframe by date
+    df = df.sort_values(date_col)
     
-    return df
-
-def create_location_features(df, location_col):
-    prefix = f'{location_col}_'
+    # Group by date and all categorical features, and calculate mean of target
+    grouped = df.groupby([date_col] + cat_features)[target_col].mean().reset_index()
     
-    # Group statistics for miles
-    location_stats = df.groupby(location_col).agg({
-        'valid_miles': ['mean', 'median', 'std']
-    })
-    location_stats.columns = [f'{prefix}{c[0]}_{c[1]}' for c in location_stats.columns]
-    df = df.merge(location_stats, left_on=location_col, right_index=True, how='left')
+    # Sort the grouped dataframe by date
+    grouped = grouped.sort_values(date_col)
     
-    # Location popularity (number of trips)
-    location_popularity = df.groupby(location_col).size().reset_index(name=f'{prefix}popularity')
-    df = df.merge(location_popularity, on=location_col, how='left')
+    # Calculate lagged features
+    for window in windows:
+        # Calculate mean
+        grouped[f"mean_{window}d"] = grouped[target_col].shift(1).rolling(window=window, min_periods=1).mean()
+        
+        # Calculate EWMA
+        grouped[f"ewma_{window}d"] = grouped[target_col].shift(1).ewm(span=window, adjust=False).mean()
+        
+        # Calculate rate change
+        grouped[f"rate_change_{window}d"] = (grouped[target_col] - grouped[target_col].shift(window)) / grouped[target_col].shift(window)
     
-    return df
-
-def get_optimal_bins(df, n_bins):
-    df['temp_category'] = pd.qcut(df['valid_miles'], q=n_bins)
-    bins = df['temp_category'].cat.categories
-    bin_edges = [b.left for b in bins] + [bins[-1].right]
-    print("Optimal bins number:", len(bin_edges)-1)
-    df.drop('temp_category', axis=1, inplace=True)
-    return bin_edges
-
-def create_distance_features(df):
+    # Merge the new features back to the original dataframe
+    result = pd.merge(df, grouped, on=[date_col] + cat_features, suffixes=('', '_mean'))
     
-    optimal_bin_edges = get_optimal_bins(df, n_bins=15)
-    # 1. Distance Bins
-    df['distance_category'] = pd.cut(df['valid_miles'], 
-                                     bins=optimal_bin_edges, 
-                                     labels=[f'bin_{i}' for i in range(len(optimal_bin_edges)-1)])
-
-    # 2. Distance Percentiles
-    df['distance_percentile'] = df['valid_miles'].rank(pct=True)
-
-    # 3. Non-linear Transformations
-    df['distance_log'] = np.log1p(df['valid_miles'])
-    df['distance_sqrt'] = np.sqrt(df['valid_miles'])
-    df['distance_squared'] = df['valid_miles'] ** 2
-
-    # 4. Distance-Time Interaction
-    # df['distance_weekend'] = df['valid_miles'] * df['is_weekend']
-    # df['distance_season'] = df['valid_miles'] * df['season'].astype('category').cat.codes
-
-    # 5. Z-score of distance within transport type
-    df['distance_zscore'] = df.groupby('transport_type')['valid_miles'].transform(lambda x: stats.zscore(x))
-
-    # 6. Rolling average distance for each origin-destination pair
-    df['rolling_avg_distance'] = df.groupby(['origin_kma', 'destination_kma'])['valid_miles'].transform(lambda x: x.rolling(window=30, min_periods=1).mean())
-
-    # 7. Distance to weight ratio
-    df['distance_weight_ratio'] = df['valid_miles'] / df['weight']
-
-    # 8. Geographical Density (without using rate)
-    df['distance_density'] = df.groupby('distance_category')['valid_miles'].transform('count') / df['valid_miles']
-
-    # 9. Average distance by transport type
-    df['avg_distance_by_transport'] = df.groupby('transport_type')['valid_miles'].transform('mean')
-
-    # 10. Distance difference from average for transport type
-    df['distance_diff_from_avg'] = df['valid_miles'] - df['avg_distance_by_transport']
-
-    return df
+    # Drop the additional target column created during merging
+    result = result.drop(columns=[f"{target_col}_mean"])
+    
+    return result
 
 def analyze_feature_importance(model, X, y, splits, cat_features):
     shap_values_list = []
@@ -274,4 +204,8 @@ def select_features(feature_importance, method='common_top', n_features=20):
     
     else:
         raise ValueError("Invalid method specified. Choose 'combined', 'common_top', or 'union_top'.")
+    
+def time_based_split(df, n_splits=5):
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    return list(tscv.split(df))
 

@@ -7,3 +7,6 @@ old
 notebooks
 cb_model
 dataset/eval_results.csv
+dataset/external_data
+dataset/full_test.csv
+feature_store

@@ -6,3 +6,4 @@ pyyaml
 shap
 catboost
 scipy
+recordlinkage

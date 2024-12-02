@@ -1,31 +1,56 @@
 import numpy as np
 import yaml
-from sklearn.model_selection import RandomizedSearchCV
+from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
 from sklearn.metrics import mean_absolute_percentage_error
-from catboost import CatBoostRegressor
+from catboost import CatBoostRegressor, Pool
 
+from data_processing import prepare_data
+from feature_engineering import select_features, time_based_split, analyze_feature_importance
 
-from data_preprocessing import prepare_data, time_based_split
-from feature_engineering import analyze_feature_importance, select_features
+def objective(params, X_train, y_train, X_val, y_val, cat_features):
+    model = CatBoostRegressor(
+        eval_metric="MAPE",
+        bootstrap_type="MVS",
+        learning_rate=0.1,
+        depth=int(params['depth']),
+        l2_leaf_reg=params['l2_leaf_reg'],
+        iterations=1000,
+        min_data_in_leaf=int(params['min_data_in_leaf']),
+        subsample=params['subsample'],
+        cat_features=cat_features,
+        random_seed=42,
+        verbose=False
+    )
 
-DF_TRAIN_PATH = 'dataset/train.csv'
-DF_EVAL_PATH = 'dataset/validation.csv'
+    model.fit(X_train, y_train, eval_set=(X_val, y_val), early_stopping_rounds=200)
+    y_pred = model.predict(X_val)
+    mape = mean_absolute_percentage_error(y_val, y_pred)
+    return {'loss': mape, 'status': STATUS_OK}
 
-def random_search_tuning(df_train, train_target, df_eval, eval_target, cat_features, n_iter=5, n_splits=5):
-    # Time-based split for cross-validation
-    splits = time_based_split(df_train, n_splits=n_splits)
+def hyperopt_tuning(df_train, df_eval, cat_features, max_evals=30):
+    train_target = df_train.rate
+    eval_target = df_eval.rate
+    drop_features = ["pickup_date", "date", "rate"]
+    df_train, df_eval = df_train.drop(drop_features, axis=1), df_eval.drop(drop_features, axis=1)
     
+    splits = time_based_split(df_train, n_splits=3)
     # Feature importance analysis
-    base_model = CatBoostRegressor(learning_rate=0.03, 
+    base_model = CatBoostRegressor(learning_rate=0.1,
+                                   eval_metric = "MAPE",
+                                   bootstrap_type="MVS",
                                    random_seed=42, 
                                    iterations=1000,
-                                   depth=6,
-                                   l2_leaf_reg=8,
+                                   depth=8,
                                    early_stopping_rounds=200)
     feature_importance = analyze_feature_importance(base_model, df_train, train_target, splits, cat_features)
     
     # Select top features
-    selected_features = select_features(feature_importance, method="common_top", n_features=15)
+    selected_features = select_features(feature_importance, method="common_top", n_features=20)
+    # selected_features = ['rate_similar_9', 'rate_similar_1', 'custom_distance_category', 
+    #                    'rate_similar_10', 'directional_route', 'rate_similar_8', 
+    #                    'rate_similar_5', 'rate_similar_4', 'origin_kma', 'rate_similar_7', 
+    #                    'rate_similar_2', 'distance_category', 'destination_kma', 
+    #                    'valid_miles', 'rate_similar_3']
     print("Selected features:", selected_features)
     
     X_train = df_train[selected_features]
@@ -36,53 +61,53 @@ def random_search_tuning(df_train, train_target, df_eval, eval_target, cat_featu
     cat_features = [cf for cf in cat_features if cf in selected_features]
     
     # Define the parameter space
-    param_dist = {
-        'learning_rate': np.logspace(-2, -1, num=100),  # Lowered upper bound
-        'depth': [2, 4, 6, 8, 10],
-        'l2_leaf_reg': np.linspace(1, 15.0, num=10),  # Increased lower bound
-        'iterations': [5000],
-        'min_data_in_leaf': [1, 5, 8, 10,12, 20],
-        'rsm': np.linspace(0.3, 0.9, num=6),
-        'grow_policy': ['SymmetricTree', 'Depthwise', 'Lossguide'],
-        'bootstrap_type': ['Bayesian','Bernoulli', 'MVS'],
-        'early_stopping_rounds': [500]
+    space = {
+        'depth': hp.quniform('depth', 4, 10, 1),
+        'l2_leaf_reg': hp.loguniform('l2_leaf_reg', np.log(1), np.log(10)),
+        'min_data_in_leaf': hp.quniform('min_data_in_leaf', 1, 30, 1),
+        'subsample': hp.uniform('subsample', 0.5, 1.0)
     }
 
-    # Create the CatBoost model
-    model = CatBoostRegressor(cat_features=cat_features, random_seed=42, verbose=False)
-
-    # Create the random search object
-    random_search = RandomizedSearchCV(
-        estimator=model,
-        param_distributions=param_dist,
-        n_iter=n_iter,
-        cv=splits,
-        random_state=42,
-        n_jobs=-1,
-        scoring='neg_mean_absolute_percentage_error',
-        verbose=2
+    trials = Trials()
+    best = fmin(
+        fn=lambda params: objective(params, X_train, y_train, X_val, y_val, cat_features),
+        space=space,
+        algo=tpe.suggest,
+        max_evals=max_evals,
+        trials=trials
     )
 
-    # Perform the random search
-    random_search.fit(X_train, y_train)
+    # Get the best parameters
+    best_params = {
+        'depth': int(best['depth']),
+        'l2_leaf_reg': best['l2_leaf_reg'],
+        'min_data_in_leaf': int(best['min_data_in_leaf']),
+        'subsample': best['subsample']
+    }
 
-    # Get the best model
-    best_model = random_search.best_estimator_
+    # Create the best model
+    best_model = CatBoostRegressor(
+        **best_params,
+        cat_features=cat_features,
+        random_seed=42,
+        verbose=False
+    )
+
+    # Fit the best model
+    best_model.fit(X_train, y_train, eval_set=(X_val, y_val), early_stopping_rounds=100)
 
     # Evaluate the best model on the validation set
     y_pred = best_model.predict(X_val)
     val_mape = mean_absolute_percentage_error(y_val, y_pred)
 
-    print(f"Best parameters: {random_search.best_params_}")
-    print(f"Best cross-validation score: {-random_search.best_score_:.4f} MAPE")
+    print(f"Best parameters: {best_params}")
     print(f"Validation MAPE: {val_mape:.4f}")
-    best_params = {k:str(v) for k,v in random_search.best_params_.items()}
-    
+
     # Create and save config
     config = {
         'selected_features': selected_features,
         'cat_features': cat_features,
-        'best_params': best_params
+        'best_params': {k: str(v) for k, v in best_params.items()}
     }
     
     with open('best_config.yml', 'w') as f:
@@ -91,6 +116,6 @@ def random_search_tuning(df_train, train_target, df_eval, eval_target, cat_featu
     return best_model, config, val_mape
 
 if __name__ == "__main__":
-    df_train, train_target, df_eval, eval_target, cat_features = prepare_data(DF_TRAIN_PATH, DF_EVAL_PATH)
-    best_model, config, val_mape = random_search_tuning(df_train, train_target, df_eval, eval_target, cat_features)
+    df_train, df_eval, df_test, _, cat_features = prepare_data(recalculate=True)
+    best_model, config, val_mape = hyperopt_tuning(df_train, df_eval, cat_features)
     print(f"Optimization complete. Config saved to 'best_config.yml'. Validation MAPE: {val_mape:.4f}")
